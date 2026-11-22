@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MedEvidence AI — Clinical Research Workspace</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div class="workspace">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">+</div>
+        <div>
+          <h1>MedEvidence</h1>
+          <span>Clinical AI Workspace</span>
+        </div>
+      </div>
+
+      <button type="button" class="new-chat-btn" id="new-thread-btn">+ New Research Thread</button>
+
+      <div class="nav-section">
+        <p class="nav-label">LIVE CLINICAL QUERIES</p>
+        <button type="button" class="nav-item preset-btn" data-prompt="Compare warnings and side effects of Ibuprofen vs Naproxen">
+          💊 Drug Safety &amp; Warnings
+        </button>
+        <button type="button" class="nav-item preset-btn" data-prompt="Find active recruiting clinical trials for Type 2 Diabetes">
+          🔬 Live Clinical Trials
+        </button>
+        <button type="button" class="nav-item preset-btn" data-prompt="What is Hypertension, its causes, and standard management?">
+          🩺 Condition Overview
+        </button>
+        <button type="button" class="nav-item preset-btn" data-prompt="What are the major drug interactions for Warfarin?">
+          ⚠️ Drug Interactions
+        </button>
+      </div>
+
+      <div class="live-status-box">
+        <div class="status-row"><span class="dot"></span> openFDA Label API</div>
+        <div class="status-row"><span class="dot"></span> ClinicalTrials.gov v2</div>
+        <div class="status-row"><span class="dot"></span> NLM MedlinePlus</div>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div class="topbar-title">Evidence-Based Clinical Synthesis</div>
+        <div class="topbar-badge">Grounded in Live Federal Health APIs</div>
+      </header>
+
+      <div id="feed" class="feed">
+        <div class="welcome-card">
+          <h2>Ask a clinical, medication, or research question</h2>
+          <p>
+            Every response queries live databases (<strong>openFDA</strong>, <strong>ClinicalTrials.gov</strong>, and <strong>MedlinePlus</strong>) 
+            and displays the raw retrieved clinical evidence in the right-hand inspector.
+          </p>
+          <div class="starter-grid">
+            <button type="button" class="preset-btn" data-prompt="What are the boxed warnings and side effects of Metformin?">
+              <strong>Metformin Safety Profile</strong>
+              <span>FDA label indications &amp; warnings</span>
+            </button>
+            <button type="button" class="preset-btn" data-prompt="Show active recruiting clinical trials for Breast Cancer">
+              <strong>Recruiting Oncology Trials</strong>
+              <span>Live ClinicalTrials.gov registry</span>
+            </button>
+            <button type="button" class="preset-btn" data-prompt="Explain Atorvastatin uses, side effects, and interactions">
+              <strong>Atorvastatin Monograph</strong>
+              <span>Statin safety &amp; interactions</span>
+            </button>
+            <button type="button" class="preset-btn" data-prompt="What are the symptoms and overview of Asthma?">
+              <strong>Asthma Clinical Guide</strong>
+              <span>NLM MedlinePlus health topic</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer-wrapper">
+        <form id="chat-form" class="composer">
+          <input
+            type="text"
+            id="chat-input"
+            placeholder="Ask about any drug, clinical trial, or medical condition..."
+            autocomplete="off"
+            required
+          />
+          <button type="submit" id="send-btn">Research &rarr;</button>
+        </form>
+      </div>
+    </main>
+
+    <aside class="evidence-panel">
+      <div class="evidence-header">
+        <h3>Live Evidence &amp; Sources</h3>
+        <span id="evidence-count">0 sources</span>
+      </div>
+      <div id="evidence-list" class="evidence-list">
+        <div class="empty-evidence">
+          Retrieved FDA drug labels, active NCT clinical trial records, and MedlinePlus citations will appear here automatically when you ask a question.
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const feed = document.getElementById("feed");
+    const chatForm = document.getElementById("chat-form");
+    const chatInput = document.getElementById("chat-input");
+    const evidenceList = document.getElementById("evidence-list");
+    const evidenceCount = document.getElementById("evidence-count");
+    const newThreadBtn = document.getElementById("new-thread-btn");
+
+    let sessionId = "research_" + Math.random().toString(36).substring(2, 10);
+
+    function startNewSession() {
+      sessionId = "research_" + Math.random().toString(36).substring(2, 10);
+      feed.innerHTML = `
+        <div class="welcome-card">
+          <h2>New Clinical Research Thread</h2>
+          <p>Ask about medications, live recruiting clinical trials, or medical conditions.</p>
+        </div>
+      `;
+      evidenceList.innerHTML = `<div class="empty-evidence">Ask a question to inspect live FDA labels, clinical trials, and MedlinePlus sources.</div>`;
+      evidenceCount.textContent = "0 sources";
+    }
+
+    function renderEvidence(evidenceItems) {
+      if (!evidenceItems || evidenceItems.length === 0) return;
+      evidenceList.innerHTML = "";
+      let totalCards = 0;
+
+      evidenceItems.forEach((item) => {
+        if (item.indications || item.warnings) {
+          totalCards++;
+          const card = document.createElement("div");
+          card.className = "evidence-card";
+          card.innerHTML = `
+            <span class="evidence-source-tag">${item.source || "openFDA"}</span>
+            <h4>${item.title || "FDA Drug Monograph"}</h4>
+            <p><strong>Warnings:</strong> ${(item.warnings || "").slice(0, 220)}...</p>
+            <p><strong>Indications:</strong> ${(item.indications || "").slice(0, 180)}...</p>
+            ${item.url ? `<a href="${item.url}" target="_blank">View Official DailyMed Label &nearr;</a>` : ""}
+          `;
+          evidenceList.appendChild(card);
+        }
+
+        if (item.trials && Array.isArray(item.trials)) {
+          item.trials.forEach((trial) => {
+            totalCards++;
+            const card = document.createElement("div");
+            card.className = "evidence-card";
+            card.innerHTML = `
+              <span class="evidence-source-tag">ClinicalTrials.gov • ${trial.nct_id}</span>
+              <h4>${trial.title}</h4>
+              <p>${trial.summary}...</p>
+              <a href="${trial.url}" target="_blank">Open Study Record (${trial.nct_id}) &nearr;</a>
+            `;
+            evidenceList.appendChild(card);
+          });
+        }
+
+        if (item.results && Array.isArray(item.results)) {
+          item.results.forEach((topic) => {
+            totalCards++;
+            const card = document.createElement("div");
+            card.className = "evidence-card";
+            card.innerHTML = `
+              <span class="evidence-source-tag">${item.source || "MedlinePlus"}</span>
+              <h4>${topic.title}</h4>
+              <p>${topic.summary.slice(0, 260)}...</p>
+              <a href="${topic.url}" target="_blank">Read Full MedlinePlus Topic &nearr;</a>
+            `;
+            evidenceList.appendChild(card);
+          });
+        }
+      });
+
+      evidenceCount.textContent = `${totalCards} live source${totalCards === 1 ? "" : "s"}`;
+    }
+
+    async function askQuestion(questionText) {
+      const welcome = feed.querySelector(".welcome-card");
+      if (welcome) welcome.remove();
+
+      const userHeading = document.createElement("div");
+      userHeading.className = "turn-user";
+      userHeading.textContent = questionText;
+      feed.appendChild(userHeading);
+
+      const aiCard = document.createElement("div");
+      aiCard.className = "turn-ai";
+      aiCard.innerHTML = "<em>Querying live openFDA, ClinicalTrials.gov, and MedlinePlus databases...</em>";
+      feed.appendChild(aiCard);
+      feed.scrollTop = feed.scrollHeight;
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: questionText, session_id: sessionId }),
+        });
+
+        if (!res.ok) {
+          throw new Error("Server returned HTTP " + res.status);
+        }
+
+        const data = await res.json();
+        const rawText = data.reply || "No response returned.";
+        aiCard.innerHTML = (typeof marked !== "undefined") ? marked.parse(rawText) : rawText;
+
+        if (data.followups && data.followups.length > 0) {
+          const chipRow = document.createElement("div");
+          chipRow.className = "followup-chips";
+          data.followups.forEach((fq) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "followup-chip";
+            btn.textContent = "+ " + fq;
+            btn.addEventListener("click", () => askQuestion(fq));
+            chipRow.appendChild(btn);
+          });
+          aiCard.appendChild(chipRow);
+        }
+
+        renderEvidence(data.evidence);
+        feed.scrollTop = feed.scrollHeight;
+      } catch (err) {
+        aiCard.innerHTML = `<strong>Error:</strong> ${err.message}. Check your PowerShell terminal for details.`;
+      }
+    }
+
+    document.querySelectorAll(".preset-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const prompt = btn.getAttribute("data-prompt");
+        if (prompt) askQuestion(prompt);
+      });
+    });
+
+    newThreadBtn.addEventListener("click", startNewSession);
+
+    chatForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const q = chatInput.value.trim();
+      if (!q) return;
+      chatInput.value = "";
+      askQuestion(q);
+    });
+  </script>
+</body>
+</html>
