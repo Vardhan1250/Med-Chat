@@ -2,7 +2,7 @@ import os
 import json
 import base64
 import xml.etree.ElementTree as ET
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
 import requests
 from dotenv import load_dotenv
@@ -20,7 +20,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 load_dotenv()
 
-app = FastAPI(title="MedEvidence Clinical AI Workspace", version="2.0.0")
+app = FastAPI(title="MedEvidence Clinical AI Workspace", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,9 +33,11 @@ app.add_middleware(
 os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Active 2026 free-tier Gemini models (each maintains a separate daily quota pool)
 MODEL_CANDIDATES = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
     "gemini-flash-latest",
 ]
 
@@ -46,6 +48,9 @@ GREETING_WORDS = {
 }
 
 
+# ---------------------------------------------------------
+# Biomedical Tools (openFDA, ClinicalTrials.gov, MedlinePlus)
+# ---------------------------------------------------------
 @tool
 def search_openfda_drug(drug_name: str) -> str:
     """Search official openFDA drug labeling for indications, boxed warnings, adverse reactions, and drug interactions."""
@@ -142,7 +147,7 @@ MEMORY = MemorySaver()
 SYSTEM_PROMPT = """You are MedEvidence, a warm, intelligent, and modern Clinical AI Assistant.
 
 BEHAVIOR RULES:
-1. Natural Conversation & Greetings: If the user says "Hi", "Hello", "Hey", asks who you are, or makes casual conversation, respond warmly and naturally like a helpful modern chatbot (e.g., "Hello! I'm MedEvidence, your clinical AI assistant. Type any disease name, symptom, or medication—or upload a prescription photo/PDF—and I'll break it down with verified medical evidence."). Do NOT call medical search tools for simple greetings.
+1. Natural Conversation & Greetings: If the user says "Hi", "Hello", "Hey", asks who you are, or makes casual conversation, respond warmly and naturally like a helpful modern chatbot. Do NOT call medical search tools for simple greetings.
 2. Single-Word Disease or Drug Queries: Users often have limited time and type only a disease or drug name (e.g., "Asthma", "Dengue", "Metformin"). Automatically treat single-word or short medical terms as a request for a complete, structured clinical briefing:
    - **Overview & Key Symptoms** (grounded via `search_medlineplus_topic`)
    - **Standard Medications & Safety Notes** (grounded via `search_openfda_drug` when a drug is relevant)
@@ -187,6 +192,71 @@ def extract_follow_ups(text: str):
     return clean_text, follow_ups[:3]
 
 
+def build_direct_evidence_fallback(query_text: str) -> Dict[str, Any]:
+    """Direct federal registry synthesis when Gemini free-tier daily quota is temporarily exhausted."""
+    sources: List[Dict[str, Any]] = []
+    sections: List[str] = [
+        f"### Clinical Evidence Brief: {query_text.title()}",
+        "*Synthesized directly from live NLM MedlinePlus, openFDA, and ClinicalTrials.gov registries.*"
+    ]
+
+    try:
+        med_raw = json.loads(search_medlineplus_topic.invoke({"topic": query_text}))
+        topics = med_raw.get("topics", [])
+        if topics:
+            sources.append(med_raw)
+            sections.append(
+                f"**Overview & Clinical Summary ({topics[0].get('title', query_text)}):**\n{topics[0].get('summary', '')}"
+            )
+    except Exception:
+        pass
+
+    try:
+        fda_raw = json.loads(search_openfda_drug.invoke({"drug_name": query_text}))
+        if fda_raw.get("indications_and_usage"):
+            sources.append(fda_raw)
+            sections.append(
+                f"**FDA Drug Labeling ({fda_raw.get('brand_name', query_text)}):**\n"
+                f"- **Indications:** {fda_raw.get('indications_and_usage')[:400]}...\n"
+                f"- **Boxed Warning:** {fda_raw.get('boxed_warning')[:300]}"
+            )
+    except Exception:
+        pass
+
+    try:
+        trials_raw = json.loads(search_clinical_trials.invoke({"condition": query_text}))
+        trials = trials_raw.get("trials", [])
+        if trials:
+            sources.append(trials_raw)
+            trial_lines = "\n".join(
+                f"- **{t.get('nct_id')}**: {t.get('title')} (*{t.get('status')}*)"
+                for t in trials
+            )
+            sections.append(f"**Active Recruiting Clinical Trials:**\n{trial_lines}")
+    except Exception:
+        pass
+
+    if len(sources) == 0:
+        sections.append(
+            "No exact registry match was returned for that phrase. Try searching a standard condition or generic medication name (e.g., *Asthma*, *Diabetes*, *Metformin*)."
+        )
+
+    sections.append(
+        "*Disclaimer: For educational and clinical research reference only. Consult a healthcare professional for medical advice.*"
+    )
+
+    return {
+        "reply": "\n\n".join(sections),
+        "sources": sources,
+        "follow_ups": [
+            f"What medications treat {query_text}?",
+            f"Clinical trials for {query_text}",
+            "Hi"
+        ],
+        "model_used": "direct-biomedical-fallback",
+    }
+
+
 @app.get("/")
 async def serve_index():
     return FileResponse("static/index.html")
@@ -199,7 +269,7 @@ async def api_status():
     masked_key = f"{google_key[:6]}••••••••{google_key[-4:]}" if len(google_key) > 10 else "Not Configured"
     return {
         "app_name": "MedEvidence Clinical AI Workspace",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "env_keys": [
             {
                 "name": "GOOGLE_API_KEY",
@@ -210,8 +280,8 @@ async def api_status():
         ],
         "integrations": [
             {
-                "name": "Google Gemini 2.5 Flash",
-                "type": "Primary Reasoning & Vision Engine",
+                "name": "Google Gemini 3.5 Flash-Lite / 3.8 Flash",
+                "type": "Primary Reasoning & Vision Engine (with Direct Registry Fallback)",
                 "auth": "GOOGLE_API_KEY (Environment Secret)",
                 "status": "Active" if google_key else "Missing Key",
             },
@@ -261,7 +331,6 @@ async def chat_endpoint(req: ChatRequest):
             ],
         }
 
-    last_error = None
     for model_name in MODEL_CANDIDATES:
         try:
             llm = get_llm(model_name)
@@ -314,11 +383,11 @@ async def chat_endpoint(req: ChatRequest):
                 "follow_ups": follow_ups,
                 "model_used": model_name,
             }
-        except Exception as e:
-            last_error = str(e)
+        except Exception:
             continue
 
-    raise HTTPException(status_code=500, detail=f"All Gemini models failed: {last_error}")
+    # Automatic zero-downtime fallback using live NLM MedlinePlus, openFDA & ClinicalTrials.gov APIs
+    return build_direct_evidence_fallback(user_msg)
 
 
 @app.post("/analyze-document")
@@ -389,4 +458,7 @@ Extract and present the findings clearly in Markdown with these exact sections:
             last_error = str(e)
             continue
 
-    raise HTTPException(status_code=500, detail=f"Document analysis failed: {last_error}")
+    raise HTTPException(
+        status_code=429 if "429" in str(last_error) else 500,
+        detail=f"Document vision quota temporarily exhausted or failed: {last_error}"
+    )
