@@ -20,7 +20,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 load_dotenv()
 
-app = FastAPI(title="MedEvidence Clinical AI Workspace", version="2.1.0")
+app = FastAPI(title="MedEvidence Clinical AI Workspace", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,7 +33,6 @@ app.add_middleware(
 os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Active 2026 free-tier Gemini models (each maintains a separate daily quota pool)
 MODEL_CANDIDATES = [
     "gemini-3.5-flash-lite",
     "gemini-3.8-flash",
@@ -48,9 +47,6 @@ GREETING_WORDS = {
 }
 
 
-# ---------------------------------------------------------
-# Biomedical Tools (openFDA, ClinicalTrials.gov, MedlinePlus)
-# ---------------------------------------------------------
 @tool
 def search_openfda_drug(drug_name: str) -> str:
     """Search official openFDA drug labeling for indications, boxed warnings, adverse reactions, and drug interactions."""
@@ -175,6 +171,20 @@ def get_llm(model_name: str):
     )
 
 
+def extract_clean_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts).strip()
+    return str(content)
+
+
 def extract_follow_ups(text: str):
     follow_ups = []
     clean_text = text
@@ -193,7 +203,6 @@ def extract_follow_ups(text: str):
 
 
 def build_direct_evidence_fallback(query_text: str) -> Dict[str, Any]:
-    """Direct federal registry synthesis when Gemini free-tier daily quota is temporarily exhausted."""
     sources: List[Dict[str, Any]] = []
     sections: List[str] = [
         f"### Clinical Evidence Brief: {query_text.title()}",
@@ -264,12 +273,11 @@ async def serve_index():
 
 @app.get("/api/status")
 async def api_status():
-    """Returns safe status metadata about configured API keys and biomedical integrations."""
     google_key = os.getenv("GOOGLE_API_KEY", "")
     masked_key = f"{google_key[:6]}••••••••{google_key[-4:]}" if len(google_key) > 10 else "Not Configured"
     return {
         "app_name": "MedEvidence Clinical AI Workspace",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "env_keys": [
             {
                 "name": "GOOGLE_API_KEY",
@@ -361,12 +369,7 @@ async def chat_endpoint(req: ChatRequest):
 
             for msg in reversed(messages):
                 if getattr(msg, "type", "") == "ai" and msg.content:
-                    if isinstance(msg.content, list):
-                        final_text = " ".join(
-                            part.get("text", "") for part in msg.content if isinstance(part, dict)
-                        )
-                    else:
-                        final_text = str(msg.content)
+                    final_text = extract_clean_text(msg.content)
                     break
 
             clean_reply, follow_ups = extract_follow_ups(final_text)
@@ -386,7 +389,6 @@ async def chat_endpoint(req: ChatRequest):
         except Exception:
             continue
 
-    # Automatic zero-downtime fallback using live NLM MedlinePlus, openFDA & ClinicalTrials.gov APIs
     return build_direct_evidence_fallback(user_msg)
 
 
@@ -395,7 +397,6 @@ async def analyze_document(
     file: UploadFile = File(...),
     notes: str = Form(default="")
 ):
-    """Analyzes an uploaded prescription image or medical PDF to identify the disease and list all tablets."""
     allowed_types = {
         "image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"
     }
@@ -418,11 +419,8 @@ User notes: {notes if notes else "None"}
 
 Extract and present the findings clearly in Markdown with these exact sections:
 1. **Detected Condition / Probable Disease:** Identify the diagnosed disease, clinical indication, or what condition these medicines treat (if diagnosis isn't explicitly written, infer the primary condition from the prescribed medications and state clearly that it is inferred).
-2. **Prescribed Tablets & Medications:** List every tablet, capsule, syrup, or medicine visible in a clean bullet list or table with:
-   - **Tablet / Medicine Name** (and generic ingredient if known)
-   - **Strength / Dosage** (e.g., 500 mg)
-   - **Frequency & Timing** (e.g., 1-0-1 after food, twice daily)
-   - **What It Treats** (simple explanation)
+2. **Prescribed Tablets & Medications:** List every tablet, capsule, syrup, or medicine visible in a clean Markdown table with columns:
+   | Tablet / Medicine Name | Strength / Dosage | Frequency & Timing | What It Treats |
 3. **Important Safety & Food/Drug Notes:** Highlight key precautions (e.g., take after meals, drowsiness, finish antibiotic course).
 4. Add a brief disclaimer reminding the patient to confirm dosages with their prescribing doctor or pharmacist.
 """
@@ -442,7 +440,7 @@ Extract and present the findings clearly in Markdown with these exact sections:
                 ]
             )
             response = llm.invoke([message])
-            analysis_text = response.content if isinstance(response.content, str) else str(response.content)
+            analysis_text = extract_clean_text(response.content)
 
             return {
                 "filename": file.filename,
